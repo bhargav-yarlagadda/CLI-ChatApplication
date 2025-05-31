@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"os"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -39,8 +40,8 @@ func RegisterUser(c *fiber.Ctx) error {
 	defer cancel()
 
 	// ✅ Get DB and Collection
-	db := database.Client.Database("users")
-	usersCol := db.Collection("users_data")
+	db := database.Client.Database(os.Getenv("USER_DB"))
+	usersCol := db.Collection(os.Getenv("USER_COL"))
 
 	// ✅ Check if user already exists
 	var existingUser bson.M
@@ -89,7 +90,6 @@ func RegisterUser(c *fiber.Ctx) error {
 	})
 }
 
-
 func LoginUser(c *fiber.Ctx) error {
 	type RequestBody struct {
 		Username string `json:"username"`
@@ -112,8 +112,8 @@ func LoginUser(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	db := database.Client.Database("users")
-	usersCol := db.Collection("users_data")
+	db := database.Client.Database(os.Getenv("USER_DB"))
+	usersCol := db.Collection(os.Getenv("USER_COL"))
 
 	var userDoc struct {
 		Username  string `bson:"username"`
@@ -161,7 +161,6 @@ func LoginUser(c *fiber.Ctx) error {
 		"publicKey": userDoc.PublicKey,
 	})
 }
-
 
 func ValidateTokenHandler(c *fiber.Ctx) error {
 	claims := c.Locals("user")

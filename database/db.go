@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"log"
+	"os"
 	"time"
 
 	"go.mongodb.org/mongo-driver/mongo"
@@ -12,7 +13,8 @@ import (
 var Client *mongo.Client
 
 func ConnectToDataBase() error {
-	uri := "mongodb+srv://bhargavyarlagadda2003:TMpZDi19Kbi3mk2i@cluster0.2puv9c2.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+	uri := os.Getenv("MONGO_URI")
+
 	if uri == "" {
 		log.Fatal("MISSING ENVIRONMENT VARIABLE: MONGO_URI")
 		return mongo.ErrClientDisconnected

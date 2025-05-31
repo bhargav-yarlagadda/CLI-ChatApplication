@@ -4,13 +4,18 @@ import (
 	"cli-chat-app/database"
 	"context"
 	"log"
-
+	"github.com/joho/godotenv"
 	"github.com/gofiber/fiber/v2"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
 var userCollection *mongo.Collection
-
+func init() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+}
 func main() {
 	// Connect to MongoDB
 	 err := database.ConnectToDataBase()
