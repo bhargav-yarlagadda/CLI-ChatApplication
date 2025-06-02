@@ -26,12 +26,16 @@ func RegisterUser(c *fiber.Ctx) error {
 	var body RequestBody
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success":false,
+
 			"error": "Invalid request. Username and password are required.",
 		})
 	}
 
 	if body.Username == "" || body.Password == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success":false,
+
 			"error": "Username and password cannot be empty.",
 		})
 	}
@@ -48,6 +52,8 @@ func RegisterUser(c *fiber.Ctx) error {
 	err := usersCol.FindOne(ctx, bson.M{"username": body.Username}).Decode(&existingUser)
 	if err == nil {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"success":false,
+
 			"error": "Username already exists.",
 		})
 	}
@@ -56,6 +62,8 @@ func RegisterUser(c *fiber.Ctx) error {
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success":false,
+
 			"error": "Password hashing failed.",
 		})
 	}
@@ -64,6 +72,8 @@ func RegisterUser(c *fiber.Ctx) error {
 	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success":false,
+
 			"error": "Key generation failed.",
 		})
 	}
@@ -79,11 +89,14 @@ func RegisterUser(c *fiber.Ctx) error {
 	_, err = usersCol.InsertOne(ctx, userDoc)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success":false,
 			"error": "Failed to create user.",
 		})
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+			"success":true,
+
 		"message":    "User registered successfully.",
 		"publicKey":  hex.EncodeToString(pubKey),
 		"privateKey": hex.EncodeToString(privKey),
@@ -99,12 +112,15 @@ func LoginUser(c *fiber.Ctx) error {
 	var body RequestBody
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success":false,
 			"error": "Invalid request. Username and password are required.",
 		})
 	}
 
 	if body.Username == "" || body.Password == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success":false,
+
 			"error": "Username and password cannot be empty.",
 		})
 	}
@@ -124,6 +140,8 @@ func LoginUser(c *fiber.Ctx) error {
 	err := usersCol.FindOne(ctx, bson.M{"username": body.Username}).Decode(&userDoc)
 	if err != nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success":false,
+
 			"error": "Invalid username or password.",
 		})
 	}
@@ -131,6 +149,8 @@ func LoginUser(c *fiber.Ctx) error {
 	err = bcrypt.CompareHashAndPassword([]byte(userDoc.Password), []byte(body.Password))
 	if err != nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success":false,
+
 			"error": "Invalid username or password.",
 		})
 	}
@@ -151,11 +171,14 @@ func LoginUser(c *fiber.Ctx) error {
 	signedToken, err := token.SignedString(jwtSecret)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success":false,
 			"error": "Failed to generate token.",
 		})
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"success":true,
+
 		"message":   "Login successful.",
 		"token":     signedToken,
 		"publicKey": userDoc.PublicKey,
@@ -166,12 +189,101 @@ func ValidateTokenHandler(c *fiber.Ctx) error {
 	claims := c.Locals("user")
 	if claims == nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success":false,
 			"error": "No user info found in token",
 		})
 	}
 
 	return c.JSON(fiber.Map{
+		"success":true,
 		"message": "Token is valid",
 		"user":    claims,
+	})
+}
+func SendMessage(c *fiber.Ctx) error {
+	var body struct {
+		Receiver string `json:"receiver"`
+		Message  string `json:"message"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid request body",
+		})
+	}
+
+	if body.Receiver == "" || body.Message == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Receiver and message must be provided",
+		})
+	}
+
+    claims := c.Locals("user").(jwt.MapClaims)
+    sender := claims["username"].(string)
+
+
+	messageDoc := bson.M{
+		"from":      sender,
+		"to":        body.Receiver,
+		"content":   body.Message,
+		"read":      false,
+		"timestamp": time.Now(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	msgCol := database.Client.Database(os.Getenv("USER_DB")).Collection(os.Getenv("MESSAGES_DB"))
+	_, err := msgCol.InsertOne(ctx, messageDoc)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to send message",
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"success": true,
+		"message": "Message sent successfully",
+	})
+}
+
+
+func GetMessages(c *fiber.Ctx) error {
+	claims := c.Locals("user").(jwt.MapClaims)
+    username := claims["username"].(string)
+
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	msgCol := database.Client.Database(os.Getenv("USER_DB")).Collection(os.Getenv("MESSAGES_DB"))
+
+	cursor, err := msgCol.Find(ctx, bson.M{
+		"$or": []bson.M{
+			{"from": username},
+			{"to": username},
+		},
+	})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to retrieve messages",
+		})
+	}
+	defer cursor.Close(ctx)
+
+	var messages []Message
+	if err := cursor.All(ctx, &messages); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Error while decoding messages",
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"success":  true,
+		"messages": messages,
 	})
 }

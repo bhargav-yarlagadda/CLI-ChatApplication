@@ -1,6 +1,10 @@
 package main
 
-import "github.com/golang-jwt/jwt/v5"
+import (
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+)
 
 type User struct {
 	Username   string
@@ -11,7 +15,8 @@ type Message struct {
 	From    string
 	To      string
 	Content string
-	read    bool
+	Read    bool
+	Timestamp time.Time
 }
 
 type JwtCustomClaims struct {
