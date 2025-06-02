@@ -12,6 +12,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -219,10 +220,43 @@ func SendMessage(c *fiber.Ctx) error {
 		})
 	}
 
-    claims := c.Locals("user").(jwt.MapClaims)
-    sender := claims["username"].(string)
+	claims := c.Locals("user").(jwt.MapClaims)
+	sender := claims["username"].(string)
 
+	if sender == body.Receiver {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Cannot send message to yourself",
+		})
+	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	friendReqCol := database.Client.Database(os.Getenv("USER_DB")).Collection(os.Getenv("FRIEND_RELATIONS"))
+
+	// Check if sender and receiver are friends (status == "accepted")
+	count, err := friendReqCol.CountDocuments(ctx, bson.M{
+		"$or": []bson.M{
+			{"from": sender, "to": body.Receiver, "status": "accepted"},
+			{"from": body.Receiver, "to": sender, "status": "accepted"},
+		},
+	})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Database error while checking friendship",
+		})
+	}
+
+	if count == 0 {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"success": false,
+			"error":   "Cannot send message. You are not friends with the recipient",
+		})
+	}
+
+	// Proceed to insert the message
 	messageDoc := bson.M{
 		"from":      sender,
 		"to":        body.Receiver,
@@ -231,11 +265,8 @@ func SendMessage(c *fiber.Ctx) error {
 		"timestamp": time.Now(),
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	msgCol := database.Client.Database(os.Getenv("USER_DB")).Collection(os.Getenv("MESSAGES_DB"))
-	_, err := msgCol.InsertOne(ctx, messageDoc)
+	_, err = msgCol.InsertOne(ctx, messageDoc)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
@@ -248,6 +279,7 @@ func SendMessage(c *fiber.Ctx) error {
 		"message": "Message sent successfully",
 	})
 }
+
 
 
 func GetMessages(c *fiber.Ctx) error {
@@ -285,5 +317,222 @@ func GetMessages(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"success":  true,
 		"messages": messages,
+	})
+}
+func MarkMessageAsRead(c *fiber.Ctx) error {
+	messageID := c.Params("id")
+	if messageID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Message ID is required",
+		})
+	}
+
+	objID, err := primitive.ObjectIDFromHex(messageID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid message ID format",
+		})
+	}
+
+	// Get logged-in user (receiver)
+	claims := c.Locals("user").(jwt.MapClaims)
+	username := claims["username"].(string)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	msgCol := database.Client.Database(os.Getenv("USER_DB")).Collection(os.Getenv("MESSAGES_DB"))
+
+	// Ensure the logged-in user is the receiver
+	filter := bson.M{"_id": objID, "to": username}
+	update := bson.M{"$set": bson.M{"read": true}}
+
+	result, err := msgCol.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to mark message as read",
+		})
+	}
+
+	if result.MatchedCount == 0 {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"success": false,
+			"error":   "You are not authorized to mark this message as read",
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"success": true,
+		"message": "Message marked as read",
+	})
+}
+
+
+func SendFriendRequest(c *fiber.Ctx) error {
+	type RequestBody struct {
+		To string `json:"to"`
+	}
+
+	var body RequestBody
+	if err := c.BodyParser(&body); err != nil || body.To == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Recipient username is required",
+		})
+	}
+
+	claims := c.Locals("user").(jwt.MapClaims)
+	from := claims["username"].(string)
+
+	if from == body.To {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Cannot send friend request to yourself",
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	db := database.Client.Database(os.Getenv("USER_DB"))
+	usersCol := db.Collection(os.Getenv("USER_COL"))
+	friendReqCol := db.Collection(os.Getenv("FRIEND_RELATIONS"))
+
+	// Check if 'to' user exists
+	var toUser struct {
+		Username  string `bson:"username"`
+		PublicKey string `bson:"publicKey"`
+	}
+	err := usersCol.FindOne(ctx, bson.M{"username": body.To}).Decode(&toUser)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"error":   "Recipient user not found",
+		})
+	}
+
+	// Check if friend request or friendship already exists
+	count, err := friendReqCol.CountDocuments(ctx, bson.M{
+		"$or": []bson.M{
+			{"from": from, "to": body.To},
+			{"from": body.To, "to": from},
+		},
+		"status": bson.M{"$in": []string{"pending", "accepted"}},
+	})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Database error",
+		})
+	}
+	if count > 0 {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"success": false,
+			"error":   "Friend request already sent or you are already friends",
+		})
+	}
+
+	// Get sender public key
+	var fromUser struct {
+		Username  string `bson:"username"`
+		PublicKey string `bson:"publicKey"`
+	}
+	err = usersCol.FindOne(ctx, bson.M{"username": from}).Decode(&fromUser)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Sender user not found",
+		})
+	}
+
+	// Insert friend request
+	reqDoc := bson.M{
+		"from":            from,
+		"to":              body.To,
+		"from_public_key": fromUser.PublicKey,
+		"to_public_key":   toUser.PublicKey,
+		"status":          "pending",
+		"created_at":      time.Now(),
+		"updated_at":      time.Now(),
+	}
+
+	_, err = friendReqCol.InsertOne(ctx, reqDoc)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to send friend request",
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"success": true,
+		"message": "Friend request sent",
+	})
+}
+
+func RespondFriendRequest(c *fiber.Ctx) error {
+	type RequestBody struct {
+		RequestID string `json:"request_id"`
+		Accept    bool   `json:"accept"`
+	}
+
+	var body RequestBody
+	if err := c.BodyParser(&body); err != nil || body.RequestID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Request ID and accept status are required",
+		})
+	}
+
+	objID, err := primitive.ObjectIDFromHex(body.RequestID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid request ID format",
+		})
+	}
+
+	claims := c.Locals("user").(jwt.MapClaims)
+	username := claims["username"].(string)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	friendReqCol := database.Client.Database(os.Getenv("USER_DB")).Collection(os.Getenv("FRIEND_RELATIONS"))
+
+	// Find the friend request
+	var friendReq FriendRequest
+	err = friendReqCol.FindOne(ctx, bson.M{"_id": objID, "to": username, "status": "pending"}).Decode(&friendReq)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"error":   "Friend request not found or already responded",
+		})
+	}
+
+	newStatus := "rejected"
+	if body.Accept {
+		newStatus = "accepted"
+	}
+
+	_, err = friendReqCol.UpdateOne(ctx, bson.M{"_id": objID}, bson.M{
+		"$set": bson.M{
+			"status":     newStatus,
+			"updated_at": time.Now(),
+		},
+	})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to update friend request",
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"success": true,
+		"message": "Friend request " + newStatus,
 	})
 }
