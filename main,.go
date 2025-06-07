@@ -49,8 +49,10 @@ func main() {
 	app.Post("/send-message", JWTMiddleware, SendMessage)
 	app.Get("/get-messages", JWTMiddleware, GetMessages)
 	app.Put("/mark-message-read/:id", JWTMiddleware, MarkMessageAsRead)
-	app.Post("/friend-request/send", JWTMiddleware, SendFriendRequest)
 	app.Post("/friend-request/respond", JWTMiddleware, RespondFriendRequest)
+	app.Post("/friend-request/send", JWTMiddleware, SendFriendRequest)
+
+	app.Get("/friend-request", JWTMiddleware,GetAllRequestForAUser)
 
 	log.Println("Server running on http://localhost:8000")
 	if err := app.Listen(":8000"); err != nil {

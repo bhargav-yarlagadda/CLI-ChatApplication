@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -534,5 +535,78 @@ func RespondFriendRequest(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"success": true,
 		"message": "Friend request " + newStatus,
+	})
+}
+
+func GetAllRequestForAUser(c *fiber.Ctx) error {
+	// 1. Auth
+	claims, ok := c.Locals("user").(jwt.MapClaims)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success": false,
+			"error":   "Unauthorized",
+		})
+	}
+	username := claims["username"].(string)
+
+	// 2. DB setup
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	friendReqCol := database.Client.
+		Database(os.Getenv("USER_DB")).
+		Collection(os.Getenv("FRIEND_RELATIONS"))
+
+	// 3. Build filter
+	status := strings.ToLower(c.Query("status")) // <- use Query here
+	if status == "" {
+		status = "pending"
+	}
+	// optionally validate
+	if status != "pending" && status != "accepted" && status != "rejected" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"error":   "Invalid status value",
+		})
+	}
+
+	filter := bson.M{
+		"to":     username,
+		"status": status,
+	}
+
+	// 4. Fetch
+	cursor, err := friendReqCol.Find(ctx, filter)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch friend requests",
+		})
+	}
+	defer cursor.Close(ctx)
+
+	var requests []bson.M
+	for cursor.Next(ctx) {
+		var req bson.M
+		if err := cursor.Decode(&req); err != nil {
+			continue
+		}
+		if id, ok := req["_id"].(primitive.ObjectID); ok {
+			req["id"] = id.Hex()
+			delete(req, "_id")
+		}
+		requests = append(requests, req)
+	}
+	if err := cursor.Err(); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   "Cursor error while reading requests",
+		})
+	}
+
+	// 5. Response
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"success":  true,
+		"requests": requests,
 	})
 }
